@@ -49,12 +49,28 @@ If we have issues with submitting to the app store w/ the extra simulator slices
 
 #### Step 3
 
-Ensure the framework includes slices for both simulator and device architectures (x86_64 i386 armv7 armv7s arm64)
+Ensure the framework includes slices for both simulator and device architectures (x86_64 arm64)
 
 ```bash
 $ lipo -info opus.framework/opus
 ```
 
+## Building the XCFramework
+
+See
+https://medium.com/strava-engineering/convert-a-universal-fat-framework-to-an-xcframework-39e33b7bd861
+
+
+
+### Removing architectures from framework
+```bash
+lipo -remove x86_64 ./iphoneos/opus.framework/opus -o ./iphoneos/opus.framework/opus
+```
+
+### Build XCFramework
+```bash
+xcodebuild -create-xcframework -framework iphoneos/opus.framework/ -framework iphonesimulator/opus.framework/ -output "opus.xcframework"
+```
 ## License
 
 MIT

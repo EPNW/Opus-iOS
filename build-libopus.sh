@@ -22,7 +22,7 @@
 ###########################################################################
 #  Choose your libopus version and your currently-installed iOS SDK version:
 #
-VERSION="1.5"
+VERSION="1.5.2"
 SDKVERSION="17.5"
 MINIOSVERSION="13.0"
 
@@ -39,15 +39,16 @@ if [ "${DEBUG}" == "true" ]; then
     OPT_LDFLAGS=""
     OPT_CONFIG_ARGS="--enable-assertions --disable-asm"
 else
-    OPT_CFLAGS="-Ofast -flto -g"
-    OPT_LDFLAGS="-flto"
+    OPT_CFLAGS="-fembed-bitcode -Ofast -g"
+    OPT_LDFLAGS="-fembed-bitcode"
     OPT_CONFIG_ARGS=""
 fi
 
 
 # No need to change this since xcode build will only compile in the
 # necessary bits from the libraries we create
-ARCHS="x86_64 arm64"
+SIMULATOR_ARCHS="x86_64 arm64"
+DEVICE_ARCHS="arm64"
 
 DEVELOPER=`xcode-select -print-path`
 #DEVELOPER="/Applications/Xcode.app/Contents/Developer"
@@ -57,9 +58,13 @@ REPOROOT=$(pwd)
 
 # Where we'll end up storing things in the end
 OUTPUTDIR="${REPOROOT}/dependencies"
+rm -fr ${OUTPUTDIR}
 mkdir -p ${OUTPUTDIR}/include
 mkdir -p ${OUTPUTDIR}/lib
-
+mkdir -p ${OUTPUTDIR}/device/lib
+mkdir -p ${OUTPUTDIR}/device/include
+mkdir -p ${OUTPUTDIR}/simulator/lib
+mkdir -p ${OUTPUTDIR}/simulator/include
 
 BUILDDIR="${REPOROOT}/build"
 
@@ -99,15 +104,13 @@ set -e # back to regular "bail out on error" mode
 
 export ORIGINALPATH=$PATH
 
-for ARCH in ${ARCHS}
+for ARCH in ${DEVICE_ARCHS}
 do
-    if [ "${ARCH}" == "i386" ] || [ "${ARCH}" == "x86_64" ]; then
-        PLATFORM="iPhoneSimulator"
-        EXTRA_CFLAGS="-arch ${ARCH}"
+    PLATFORM="iPhoneOS"
+    EXTRA_CFLAGS="-arch ${ARCH}"
+    if [ "${ARCH}" == "x86_64" ]; then
         EXTRA_CONFIG="--host=x86_64-apple-darwin"
     else
-        PLATFORM="iPhoneOS"
-        EXTRA_CFLAGS="-arch ${ARCH}"
         EXTRA_CONFIG="--host=arm-apple-darwin"
     fi
 
@@ -126,49 +129,96 @@ do
 	make clean
 done
 
+
+for ARCH in ${SIMULATOR_ARCHS}
+do
+    PLATFORM="iPhoneSimulator"
+    EXTRA_CFLAGS="-arch ${ARCH}"
+    if [ "${ARCH}" == "x86_64" ]; then
+        EXTRA_CONFIG="--host=x86_64-apple-darwin"
+    else
+        EXTRA_CONFIG="--host=arm-apple-darwin"
+    fi
+
+    mkdir -p "${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk"
+
+    ./configure --enable-float-approx --disable-shared --enable-static --with-pic --disable-extra-programs --disable-doc --disable-asm ${EXTRA_CONFIG} \
+    --prefix="${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk" \
+    LDFLAGS="$LDFLAGS ${OPT_LDFLAGS} -fPIE -miphonesimulator-version-min=${MINIOSVERSION} -L${OUTPUTDIR}/lib" \
+    CFLAGS="$CFLAGS ${EXTRA_CFLAGS} ${OPT_CFLAGS} -fPIE -miphonesimulator-version-min=${MINIOSVERSION} -I${OUTPUTDIR}/include -isysroot ${DEVELOPER}/Platforms/${PLATFORM}.platform/Developer/SDKs/${PLATFORM}${SDKVERSION}.sdk" \
+
+    # Build the application and install it to the fake SDK intermediary dir
+    # we have set up. Make sure to clean up afterward because we will re-use
+    # this source tree to cross-compile other targets.
+    make -j4
+    make install
+    make clean
+done
+
 ########################################
 
 echo "Build library..."
 
 # These are the libs that comprise libopus.
-OUTPUT_LIBS="libopus.a"
-for OUTPUT_LIB in ${OUTPUT_LIBS}; do
-	INPUT_LIBS=""
-	for ARCH in ${ARCHS}; do
-		if [ "${ARCH}" == "i386" ] || [ "${ARCH}" == "x86_64" ];
-		then
-			PLATFORM="iPhoneSimulator"
-		else
-			PLATFORM="iPhoneOS"
-		fi
+OUTPUT_LIB="libopus.a"
+DEVICE_INPUT_LIBS=""
+SIMULATOR_INPUT_LIBS=""
+
+# DEVICE
+for ARCH in ${DEVICE_ARCHS}; do
+        PLATFORM="iPhoneOS"
 		INPUT_ARCH_LIB="${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk/lib/${OUTPUT_LIB}"
 		if [ -e $INPUT_ARCH_LIB ]; then
-			INPUT_LIBS="${INPUT_LIBS} ${INPUT_ARCH_LIB}"
+			DEVICE_INPUT_LIBS="${DEVICE_INPUT_LIBS} ${INPUT_ARCH_LIB}"
 		fi
-	done
-	# Combine the three architectures into a universal library.
-	if [ -n "$INPUT_LIBS"  ]; then
-		lipo -create $INPUT_LIBS \
-		-output "${OUTPUTDIR}/lib/${OUTPUT_LIB}"
-	else
-		echo "$OUTPUT_LIB does not exist, skipping (are the dependencies installed?)"
-	fi
 done
 
-for ARCH in ${ARCHS}; do
-	if [ "${ARCH}" == "i386" ] || [ "${ARCH}" == "x86_64" ];
-	then
-		PLATFORM="iPhoneSimulator"
-	else
-		PLATFORM="iPhoneOS"
-	fi
-	cp -R ${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk/include/* ${OUTPUTDIR}/include/
+# Combine the three architectures into a universal library.
+if [ -n "$DEVICE_INPUT_LIBS"  ]; then
+    lipo -create $DEVICE_INPUT_LIBS -output "${OUTPUTDIR}/device/lib/${OUTPUT_LIB}"
+else
+	echo "$OUTPUT_LIB does not exist, skipping (are the dependencies installed?)"
+fi
+
+for ARCH in ${DEVICE_ARCHS}; do
+    PLATFORM="iPhoneOS"
+	cp -R ${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk/include/* ${OUTPUTDIR}/device/include/
 	if [ $? == "0" ]; then
 		# We only need to copy the headers over once. (So break out of forloop
 		# once we get first success.)
 		break
 	fi
 done
+
+# SIMULATOR
+
+for ARCH in ${SIMULATOR_ARCHS}; do
+        PLATFORM="iPhoneSimulator"
+        INPUT_ARCH_LIB="${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk/lib/${OUTPUT_LIB}"
+        if [ -e $INPUT_ARCH_LIB ]; then
+            SIMULATOR_INPUT_LIBS="${SIMULATOR_INPUT_LIBS} ${INPUT_ARCH_LIB}"
+        fi
+done
+
+# Combine the three architectures into a universal library.
+if [ -n "$SIMULATOR_INPUT_LIBS"  ]; then
+    lipo -create $SIMULATOR_INPUT_LIBS -output "${OUTPUTDIR}/simulator/lib/${OUTPUT_LIB}"
+else
+    echo "$OUTPUT_LIB does not exist, skipping (are the dependencies installed?)"
+fi
+
+for ARCH in ${SIMULATOR_ARCHS}; do
+    PLATFORM="iPhoneSimulator"
+    cp -R ${INTERDIR}/${PLATFORM}${SDKVERSION}-${ARCH}.sdk/include/* ${OUTPUTDIR}/simulator/include/
+    if [ $? == "0" ]; then
+        # We only need to copy the headers over once. (So break out of forloop
+        # once we get first success.)
+        break
+    fi
+done
+
+### Build xcframework
+xcodebuild -create-xcframework -library ${OUTPUTDIR}/device/lib/${OUTPUT_LIB} -headers ${OUTPUTDIR}/device/include/opus/ -library ${OUTPUTDIR}/simulator/lib/${OUTPUT_LIB} -headers ${OUTPUTDIR}/simulator/include/opus/ -output ${OUTPUTDIR}/opus.xcframework
 
 
 ####################
